@@ -1699,11 +1699,14 @@ impl FileSystem for PassthroughFs {
 
     fn open(
         &self,
-        _ctx: Context,
+        ctx: Context,
         inode: Inode,
         kill_priv: bool,
         flags: u32,
     ) -> io::Result<(Option<Handle>, OpenOptions)> {
+        // set credentials before opening file for NFS root_squash compatibility
+        let _credentials_guard =
+            self.unix_credentials_guard(&ctx, &Extensions::default())?;
         self.do_open(inode, kill_priv, flags)
     }
 
@@ -1796,7 +1799,10 @@ impl FileSystem for PassthroughFs {
         Ok((entry, Some(handle), opts))
     }
 
-    fn unlink(&self, _ctx: Context, parent: Inode, name: &CStr) -> io::Result<()> {
+    fn unlink(&self, ctx: Context, parent: Inode, name: &CStr) -> io::Result<()> {
+        // set credentials before unlink for NFS root_squash compatibility
+        let _credentials_guard =
+            self.unix_credentials_guard(&ctx, &Extensions::default())?;
         self.do_unlink(parent, name, 0)
     }
 
@@ -1821,7 +1827,7 @@ impl FileSystem for PassthroughFs {
 
     fn write<R: ZeroCopyReader>(
         &self,
-        _ctx: Context,
+        ctx: Context,
         inode: Inode,
         handle: Handle,
         mut r: R,
@@ -1833,6 +1839,10 @@ impl FileSystem for PassthroughFs {
         flags: u32,
     ) -> io::Result<usize> {
         let data = self.find_handle(handle, inode)?;
+
+        // set credentials before write for NFS root_squash compatibility
+        let _credentials_guard =
+            self.unix_credentials_guard(&ctx, &Extensions::default())?;
 
         // This is safe because write_to_file_at uses `pwritev2(2)`, so the underlying file
         // descriptor offset is not affected by this operation.
