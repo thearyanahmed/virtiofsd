@@ -1,0 +1,19 @@
+FROM --platform=linux/amd64 rust:bookworm
+
+RUN apt-get update && apt-get install -y \
+    libcap-ng-dev \
+    libseccomp-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+RUN cargo build --release
+
+# copy binary and required libs to output dir
+RUN mkdir -p /output && \
+    cp /build/target/release/virtiofsd /output/ && \
+    cp /usr/lib/x86_64-linux-gnu/libseccomp.so.2 /output/ && \
+    cp /usr/lib/x86_64-linux-gnu/libcap-ng.so.0 /output/
+
+CMD ["sh", "-c", "cp -r /output/* /dest/"]
