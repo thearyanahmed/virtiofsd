@@ -1808,7 +1808,7 @@ impl FileSystem for PassthroughFs {
 
     fn read<W: ZeroCopyWriter>(
         &self,
-        _ctx: Context,
+        ctx: Context,
         inode: Inode,
         handle: Handle,
         mut w: W,
@@ -1818,6 +1818,10 @@ impl FileSystem for PassthroughFs {
         _flags: u32,
     ) -> io::Result<usize> {
         let data = self.find_handle(handle, inode)?;
+
+        // set credentials before read for NFS root_squash compatibility
+        let _credentials_guard =
+            self.unix_credentials_guard(&ctx, &Extensions::default())?;
 
         // This is safe because read_from_file_at uses preadv64, so the underlying file descriptor
         // offset is not affected by this operation.
@@ -1883,12 +1887,16 @@ impl FileSystem for PassthroughFs {
 
     fn setattr(
         &self,
-        _ctx: Context,
+        ctx: Context,
         inode: Inode,
         attr: fuse::SetattrIn,
         handle: Option<Handle>,
         valid: SetattrValid,
     ) -> io::Result<(fuse::Attr, Duration)> {
+        // set credentials before setattr for NFS root_squash compatibility
+        let _credentials_guard =
+            self.unix_credentials_guard(&ctx, &Extensions::default())?;
+
         let inode_data = self.inodes.get(inode).ok_or_else(ebadf)?;
 
         // In this case, we need to open a new O_RDWR FD
