@@ -133,6 +133,59 @@ The fix works with all common NFS export options:
 | `root_squash` | Maps only root to anonymous, others pass through | Yes |
 | `no_squash` | All UIDs pass through as-is | Yes |
 
+## Current Limitation: Group-Based Write Access
+
+The current fix (`CAP_DAC_READ_SEARCH`) only supports **owner-based access**. Group-based
+write access does NOT work.
+
+### What Works
+
+| Access Type | READ | WRITE |
+|-------------|:----:|:-----:|
+| Owner (uid matches) | ✅ | ✅ |
+| Group (gid matches, uid differs) | ✅ | ❌ |
+| Other | ❌ | ❌ |
+
+### Test Results
+
+With NFS export `all_squash,anonuid=1000,anongid=1000` and directory owned by `1000:1000`:
+
+| User | uid:gid | WRITE | READ | Error |
+|------|---------|:-----:|:----:|-------|
+| appnfs | 1000:1000 | ✅ | ✅ | - |
+| appnfs2 | 1001:1000 | ❌ | ✅ | EPERM |
+| appother | 2000:1234 | ❌ | ❌ | Permission denied |
+
+### Why Group Write Fails
+
+Two capabilities are relevant:
+
+| Capability | Purpose | Current Status |
+|------------|---------|----------------|
+| `CAP_DAC_READ_SEARCH` | Bypass read permission checks | ✅ Added unconditionally |
+| `CAP_DAC_OVERRIDE` | Bypass write permission checks | ⚠️ Conditional on `keep_capability` flag |
+
+The code already has `CAP_DAC_OVERRIDE` but it's gated:
+
+```rust
+if change_uid {
+    add_cap_to_eff("DAC_READ_SEARCH");  // always added
+}
+
+if change_uid && self.keep_capability {  // only if keep_capability=true
+    add_cap_to_eff("DAC_OVERRIDE");
+}
+```
+
+### Potential Fix
+
+To enable group-based write access, either:
+1. Enable `keep_capability` flag in virtiofsd configuration
+2. Add `CAP_DAC_OVERRIDE` unconditionally (like `CAP_DAC_READ_SEARCH`)
+
+**Security note**: `CAP_DAC_OVERRIDE` bypasses ALL write permission checks, which may
+have security implications. The `keep_capability` flag exists for this reason.
+
 ## Testing
 
 Verify NFS operations work correctly:
