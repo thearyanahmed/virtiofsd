@@ -1699,12 +1699,72 @@ impl FileSystem for PassthroughFs {
 
     fn open(
         &self,
-        _ctx: Context,
+        ctx: Context,
         inode: Inode,
         kill_priv: bool,
         flags: u32,
     ) -> io::Result<(Option<Handle>, OpenOptions)> {
-        self.do_open(inode, kill_priv, flags)
+        use std::io::Write;
+
+        // get file stat info before opening
+        let file_stat = if let Ok(data) = self.inodes.get(inode).ok_or_else(ebadf) {
+            if let Ok(inode_file) = data.get_file() {
+                let mut st: libc::stat64 = unsafe { std::mem::zeroed() };
+                let ret = unsafe { libc::fstat64(inode_file.as_raw_fd(), &mut st) };
+                if ret == 0 {
+                    Some((st.st_uid, st.st_gid, st.st_mode))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/virtiofsd-nfs-debug.log") {
+            let _ = writeln!(f, "OPEN: ctx.uid={}, ctx.gid={}, inode={}, flags={:#x}", ctx.uid, ctx.gid, inode, flags);
+            if let Some((st_uid, st_gid, st_mode)) = file_stat {
+                let _ = writeln!(f, "OPEN: file stat: uid={}, gid={}, mode={:#o}", st_uid, st_gid, st_mode);
+            }
+        }
+
+        // set credentials before opening file for NFS root_squash compatibility
+        let cred_guard = self.unix_credentials_guard(&ctx, &Extensions::default())?;
+        let cred_set = cred_guard.is_some();
+        let _credentials_guard = cred_guard;
+
+        // get detailed credential info
+        let euid = unsafe { libc::geteuid() };
+        let egid = unsafe { libc::getegid() };
+        let mut ruid: libc::uid_t = 0;
+        let mut euid2: libc::uid_t = 0;
+        let mut suid: libc::uid_t = 0;
+        unsafe { libc::getresuid(&mut ruid, &mut euid2, &mut suid) };
+
+        // get supplementary groups
+        let ngroups = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+        let groups = if ngroups > 0 {
+            let mut grps = vec![0 as libc::gid_t; ngroups as usize];
+            unsafe { libc::getgroups(ngroups, grps.as_mut_ptr()) };
+            format!("{:?}", grps)
+        } else {
+            "[]".to_string()
+        };
+
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/virtiofsd-nfs-debug.log") {
+            let _ = writeln!(f, "OPEN: cred_set={}, euid={}, egid={}, ruid={}, suid={}, groups={}",
+                cred_set, euid, egid, ruid, suid, groups);
+        }
+
+        let result = self.do_open(inode, kill_priv, flags);
+        if let Err(ref e) = result {
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/virtiofsd-nfs-debug.log") {
+                let _ = writeln!(f, "OPEN failed: error={}, errno={:?}", e, e.raw_os_error());
+            }
+        }
+        result
     }
 
     fn release(
@@ -1796,13 +1856,16 @@ impl FileSystem for PassthroughFs {
         Ok((entry, Some(handle), opts))
     }
 
-    fn unlink(&self, _ctx: Context, parent: Inode, name: &CStr) -> io::Result<()> {
+    fn unlink(&self, ctx: Context, parent: Inode, name: &CStr) -> io::Result<()> {
+        // set credentials before unlink for NFS root_squash compatibility
+        let _credentials_guard =
+            self.unix_credentials_guard(&ctx, &Extensions::default())?;
         self.do_unlink(parent, name, 0)
     }
 
     fn read<W: ZeroCopyWriter>(
         &self,
-        _ctx: Context,
+        ctx: Context,
         inode: Inode,
         handle: Handle,
         mut w: W,
@@ -1813,15 +1876,39 @@ impl FileSystem for PassthroughFs {
     ) -> io::Result<usize> {
         let data = self.find_handle(handle, inode)?;
 
+        // set credentials before read for NFS root_squash compatibility
+        let cred_guard = self.unix_credentials_guard(&ctx, &Extensions::default())?;
+        let cred_set = cred_guard.is_some();
+        let _credentials_guard = cred_guard;
+
+        // log the credentials being used
+        let euid = unsafe { libc::geteuid() };
+        let egid = unsafe { libc::getegid() };
+        {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/virtiofsd-nfs-debug.log") {
+                let _ = writeln!(f, "READ: ctx.uid={}, ctx.gid={}, cred_set={}, euid={}, egid={}, inode={}, handle={}", ctx.uid, ctx.gid, cred_set, euid, egid, inode, handle);
+            }
+        }
+
         // This is safe because read_from_file_at uses preadv64, so the underlying file descriptor
         // offset is not affected by this operation.
         let f = data.file.get()?.read().unwrap();
-        w.read_from_file_at(f.get_file(), size as usize, offset, None)
+        let result = w.read_from_file_at(f.get_file(), size as usize, offset, None);
+
+        if let Err(ref e) = result {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/virtiofsd-nfs-debug.log") {
+                let _ = writeln!(f, "READ failed: error={}, errno={:?}", e, e.raw_os_error());
+            }
+        }
+
+        result
     }
 
     fn write<R: ZeroCopyReader>(
         &self,
-        _ctx: Context,
+        ctx: Context,
         inode: Inode,
         handle: Handle,
         mut r: R,
@@ -1833,6 +1920,10 @@ impl FileSystem for PassthroughFs {
         flags: u32,
     ) -> io::Result<usize> {
         let data = self.find_handle(handle, inode)?;
+
+        // set credentials before write for NFS root_squash compatibility
+        let _credentials_guard =
+            self.unix_credentials_guard(&ctx, &Extensions::default())?;
 
         // This is safe because write_to_file_at uses `pwritev2(2)`, so the underlying file
         // descriptor offset is not affected by this operation.
@@ -1873,12 +1964,16 @@ impl FileSystem for PassthroughFs {
 
     fn setattr(
         &self,
-        _ctx: Context,
+        ctx: Context,
         inode: Inode,
         attr: fuse::SetattrIn,
         handle: Option<Handle>,
         valid: SetattrValid,
     ) -> io::Result<(fuse::Attr, Duration)> {
+        // set credentials before setattr for NFS root_squash compatibility
+        let _credentials_guard =
+            self.unix_credentials_guard(&ctx, &Extensions::default())?;
+
         let inode_data = self.inodes.get(inode).ok_or_else(ebadf)?;
 
         // In this case, we need to open a new O_RDWR FD

@@ -61,6 +61,15 @@ impl UnixCredentials {
             oslib::seteffuid(self.uid)?;
         }
 
+        if change_uid {
+            // add DAC_READ_SEARCH capability to allow open_by_handle_at syscall
+            // this capability is required when using file handles (which NFS uses)
+            // and the euid doesn't have CAP_DAC_READ_SEARCH by default after setresuid
+            if let Err(e) = crate::util::add_cap_to_eff("DAC_READ_SEARCH") {
+                warn!("failed to add 'DAC_READ_SEARCH' to the effective set of capabilities: {e}");
+            }
+        }
+
         if change_uid && self.keep_capability {
             // Before kernel 6.3, we don't have access to process supplementary groups.
             // To work around this we can set the `DAC_OVERRIDE` in the effective set.

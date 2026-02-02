@@ -43,13 +43,57 @@ pub fn reopen_fd_through_proc(
     flags: libc::c_int,
     proc_self_fd: &File,
 ) -> io::Result<File> {
+    use std::io::Write;
+
+    // first get the actual file path for NFS debugging
+    let path = get_path_by_fd(fd, proc_self_fd).ok();
+
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/virtiofsd-nfs-debug.log") {
+        let _ = writeln!(f, "reopen_fd_through_proc: fd={}, flags={:#x}, path={:?}",
+            fd.as_raw_fd(), flags, path);
+    }
+
+    // try opening directly by path first (for NFS files, this may work better)
+    if let Some(ref file_path) = path {
+        let path_str = file_path.to_string_lossy();
+        // only try direct open for NFS-like paths (not for root-owned system files)
+        if !path_str.starts_with("/proc") && !path_str.starts_with("/sys") {
+            let direct_flags = flags & !libc::O_NOFOLLOW;
+            let direct_result = unsafe {
+                let fd = libc::open(file_path.as_ptr(), direct_flags);
+                if fd >= 0 {
+                    Ok(File::from_raw_fd(fd))
+                } else {
+                    Err(io::Error::last_os_error())
+                }
+            };
+
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/virtiofsd-nfs-debug.log") {
+                let _ = writeln!(f, "reopen_fd_through_proc: direct open result: {:?}",
+                    direct_result.as_ref().map(|_| "success").map_err(|e| format!("{}", e)));
+            }
+
+            if direct_result.is_ok() {
+                return direct_result;
+            }
+        }
+    }
+
+    // fallback to original proc method
     // Clear the `O_NOFOLLOW` flag if it is set since we need to follow the `/proc/self/fd` symlink
     // to get the file.
-    openat(
+    let result = openat(
         proc_self_fd,
         format!("{}", fd.as_raw_fd()).as_str(),
         flags & !libc::O_NOFOLLOW,
-    )
+    );
+
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/virtiofsd-nfs-debug.log") {
+        let _ = writeln!(f, "reopen_fd_through_proc: proc fallback result: {:?}",
+            result.as_ref().map(|_| "success").map_err(|e| format!("{}", e)));
+    }
+
+    result
 }
 
 /// Returns true if it's safe to open this inode without O_PATH.

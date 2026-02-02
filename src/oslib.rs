@@ -349,12 +349,29 @@ pub fn open_by_handle_at(
     file_handle: &CFileHandle,
     flags: libc::c_int,
 ) -> Result<File> {
+    use std::io::Write;
+
+    // log credentials before open_by_handle_at call
+    let euid = unsafe { libc::geteuid() };
+    let egid = unsafe { libc::getegid() };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/virtiofsd-nfs-debug.log") {
+        let _ = writeln!(f, "open_by_handle_at: mount_fd={}, flags={:#x}, euid={}, egid={}",
+            mount_fd.as_raw_fd(), flags, euid, egid);
+    }
+
     // SAFETY: `mount_fd` is a valid file descriptor and `file_handle`
     // is a valid reference to `CFileHandle`
     let fd = check_retval(unsafe {
         filehandle::open_by_handle_at(mount_fd.as_raw_fd(), file_handle, flags)
-    })?;
+    });
 
+    if let Err(ref e) = fd {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/virtiofsd-nfs-debug.log") {
+            let _ = writeln!(f, "open_by_handle_at failed: error={}, errno={:?}", e, e.raw_os_error());
+        }
+    }
+
+    let fd = fd?;
     // SAFETY: `open_by_handle_at()` guarantees `fd` is a valid file descriptor
     Ok(unsafe { File::from_raw_fd(fd) })
 }
