@@ -52,6 +52,40 @@ This is safe because:
 2. The capability is already in the permitted set (virtiofsd runs as root)
 3. When switching back to root, the permitted set is copied to effective
 
+## Execution Flow
+
+The capability is restored **immediately after** the UID change, before any
+filesystem syscall. Here's the sequence for a file operation:
+
+```
+1. Guest requests file open (e.g., cat /mnt/nfs/file.txt)
+2. virtiofsd calls UnixCredentials::set()
+3.   → setresuid(-1, uid, -1)           // euid: 0 → 1000, loses capabilities
+4.   → add_cap_to_eff("DAC_READ_SEARCH") // restore capability immediately
+5. virtiofsd calls open_by_handle_at()   // succeeds (has capability)
+6. File operation completes
+7. UnixCredentialsGuard is dropped
+8.   → setresuid(-1, 0, -1)             // euid: 1000 → 0, caps auto-restored
+```
+
+The `UnixCredentialsGuard` is a Rust RAII guard that automatically resets the
+UID back to root when it goes out of scope. This ensures credentials are always
+properly cleaned up, even if an error occurs.
+
+## UID Independence
+
+The fix works with **any container UID** (999, 1000, 65534, etc.). The patch
+restores the capability after any UID change - it doesn't matter what the
+target UID is.
+
+File ownership on NFS depends on the export configuration:
+
+| Container UID | all_squash (anonuid=999) | root_squash |
+|---------------|--------------------------|-------------|
+| 999 | Files owned by 999 | Files owned by 999 |
+| 1000 | Files owned by 999 | Files owned by 1000 |
+| 65534 | Files owned by 999 | Files owned by 65534 |
+
 ## NFS Export Configurations
 
 The fix works with all common NFS export options:
