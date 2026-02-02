@@ -72,6 +72,43 @@ The `UnixCredentialsGuard` is a Rust RAII guard that automatically resets the
 UID back to root when it goes out of scope. This ensures credentials are always
 properly cleaned up, even if an error occurs.
 
+## Multiple Operations
+
+The patch works for **every** file operation, not just once. Each operation
+creates a new credential guard, and the capability is restored each time:
+
+```
+First read:
+  set() → setresuid(0→1000) → add CAP → open → drop guard → back to root
+
+Second read:
+  set() → setresuid(0→1000) → add CAP → open → drop guard → back to root
+
+Nth read:
+  ... same flow, capability restored every time
+```
+
+The patch is in `UnixCredentials::set()`, which is called for every file
+operation that requires credential switching:
+
+```rust
+pub fn set(self) -> io::Result<Option<UnixCredentialsGuard>> {
+    // ...
+    if change_uid {
+        oslib::seteffuid(self.uid)?;                      // UID change
+    }
+
+    if change_uid {
+        crate::util::add_cap_to_eff("DAC_READ_SEARCH");   // restore cap
+    }
+
+    Ok(Some(UnixCredentialsGuard { ... }))                // return guard
+}
+```
+
+Since `set()` is called for each operation, the capability is always available
+when needed. The guard handles cleanup only (resetting UID back to root).
+
 ## UID Independence
 
 The fix works with **any container UID** (999, 1000, 65534, etc.). The patch
